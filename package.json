@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start:keeper": "node scripts/keeper.js",
+    "start:agent": "node scripts/agent-bot.js"
   },
   "keywords": [],
   "author": "",

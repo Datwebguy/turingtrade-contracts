@@ -12,6 +12,11 @@ contract TuringRound is Ownable, ReentrancyGuard {
 
     uint256 public constant PROTOCOL_FEE_BPS = 500;
     uint256 public constant MAX_PARTICIPANTS  = 100;
+    int256  public constant MIN_AMOUNT_BPS    = 1;
+    int256  public constant MAX_AMOUNT_BPS    = 10_000;
+
+    // Separate keeper role — limits blast radius if the keeper key is compromised
+    address public keeper;
 
     enum RoundState { Open, Active, Finalizing, Closed }
 
@@ -39,9 +44,9 @@ contract TuringRound is Ownable, ReentrancyGuard {
     uint256 public roundCount;
     mapping(uint256 => Round) public rounds;
     mapping(uint256 => mapping(address => Participant)) public participants;
-    // Pull-payment: owner accumulates fees here, withdraws separately
     uint256 public pendingOwnerFees;
 
+    event KeeperSet(address indexed keeper);
     event RoundCreated(uint256 indexed roundId, uint256 entryFee, uint256 startTime, uint256 endTime);
     event ParticipantEntered(uint256 indexed roundId, address indexed participant, bool isAI);
     event TradeSubmitted(uint256 indexed roundId, address indexed trader, string pair, int256 amountBps, bool isBuy, uint256 logEntryId);
@@ -49,12 +54,24 @@ contract TuringRound is Ownable, ReentrancyGuard {
     event PrizeClaimed(uint256 indexed roundId, address indexed winner, uint256 amount);
     event FundsRecovered(uint256 indexed roundId, uint256 amount);
 
+    modifier onlyKeeper() {
+        require(msg.sender == keeper || msg.sender == owner(), "Not keeper");
+        _;
+    }
+
     constructor(address _reasoningLog, address _agentRegistry) Ownable(msg.sender) {
         reasoningLog  = ReasoningLog(_reasoningLog);
         agentRegistry = AgentRegistry(_agentRegistry);
+        keeper = msg.sender;   // deployer is keeper by default; call setKeeper to rotate
     }
 
     // ── Admin ──────────────────────────────────────────────────────────────
+
+    function setKeeper(address _keeper) external onlyOwner {
+        require(_keeper != address(0), "Zero address");
+        keeper = _keeper;
+        emit KeeperSet(_keeper);
+    }
 
     function createRound(
         uint256 entryFee,
@@ -86,7 +103,6 @@ contract TuringRound is Ownable, ReentrancyGuard {
         rounds[roundId].prizePool += msg.value;
     }
 
-    /// @notice Pull-payment: owner withdraws accumulated fees
     function withdrawFees() external onlyOwner nonReentrant {
         uint256 amount = pendingOwnerFees;
         require(amount > 0, "Nothing to withdraw");
@@ -95,12 +111,14 @@ contract TuringRound is Ownable, ReentrancyGuard {
         require(ok, "Withdraw failed");
     }
 
-    /// @notice If no winner (all liquidated), owner can recover funds after round closes
     function recoverNoWinnerFunds(uint256 roundId) external onlyOwner nonReentrant {
         Round storage r = rounds[roundId];
         require(r.state == RoundState.Closed, "Not closed");
         require(r.winner == address(0), "Has a winner");
-        uint256 amount = r.prizePool;
+        // The fee portion was already added to pendingOwnerFees in submitResults.
+        // Only recover the non-fee remainder to avoid double-counting.
+        uint256 fee    = (r.prizePool * PROTOCOL_FEE_BPS) / 10_000;
+        uint256 amount = r.prizePool - fee;
         require(amount > 0, "Nothing to recover");
         r.prizePool = 0;
         emit FundsRecovered(roundId, amount);
@@ -118,7 +136,6 @@ contract TuringRound is Ownable, ReentrancyGuard {
         require(participants[roundId][msg.sender].addr == address(0), "Already entered");
         require(r.participantList.length < MAX_PARTICIPANTS, "Round full");
 
-        // Verify AI entrants actually have a registered agent NFT
         if (isAI) {
             require(agentRegistry.ownerToAgent(msg.sender) != 0, "No registered agent");
         }
@@ -150,6 +167,7 @@ contract TuringRound is Ownable, ReentrancyGuard {
         bool    isBuy,
         string calldata reasoning
     ) external returns (uint256 logEntryId) {
+        require(amountBps >= MIN_AMOUNT_BPS && amountBps <= MAX_AMOUNT_BPS, "amountBps out of range");
         Round storage r = rounds[roundId];
         require(r.state == RoundState.Active, "Round not active");
         require(block.timestamp < r.endTime, "Round ended");
@@ -165,12 +183,13 @@ contract TuringRound is Ownable, ReentrancyGuard {
 
     // ── Finalisation ───────────────────────────────────────────────────────
 
+    // onlyKeeper: does not require full owner privileges
     function submitResults(
         uint256 roundId,
         address[] calldata addrs,
         int256[]  calldata roiBpsArr,
         bool[]    calldata liquidatedArr
-    ) external onlyOwner {
+    ) external onlyKeeper {
         require(
             addrs.length == roiBpsArr.length && addrs.length == liquidatedArr.length,
             "Length mismatch"
@@ -197,7 +216,6 @@ contract TuringRound is Ownable, ReentrancyGuard {
         r.winnerRoiBps = best;
         r.state        = RoundState.Closed;
 
-        // Accumulate fee for pull-payment withdrawal — never push to external address here
         uint256 fee = (r.prizePool * PROTOCOL_FEE_BPS) / 10_000;
         pendingOwnerFees += fee;
 

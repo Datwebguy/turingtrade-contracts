@@ -1,7 +1,7 @@
-[build]
-
-app = "turingtrade-keeper"
+app            = "turingtrade-keeper"
 primary_region = "ord"
+
+[build]
 
 [deploy]
   strategy = "immediate"
@@ -10,6 +10,6 @@ primary_region = "ord"
   app = "node scripts/keeper.js"
 
 [[vm]]
-  memory = "256mb"
+  memory   = "256mb"
   cpu_kind = "shared"
-  cpus = 1
+  cpus     = 1

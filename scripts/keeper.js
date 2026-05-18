@@ -3,11 +3,13 @@ const { ethers } = require('ethers')
 const fs   = require('fs')
 const path = require('path')
 
-const RPC_URL          = process.env.RPC_URL || 'https://rpc.sepolia.mantle.xyz'
-// Keeper has its own key — separate from deployer so a leak doesn't give owner access
-const PRIVATE_KEY      = process.env.KEEPER_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY
-const CONTRACT_ADDRESS = '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3'
-const POLL_INTERVAL_MS = 60_000
+const RPC_URL              = process.env.RPC_URL || 'https://rpc.sepolia.mantle.xyz'
+const PRIVATE_KEY          = process.env.KEEPER_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY
+const CONTRACT_ADDRESS     = '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3'
+const POLL_INTERVAL_MS     = 60_000
+const ENTRY_FEE_MNT        = process.env.ENTRY_FEE_MNT        || '0.1'
+const ROUND_DURATION_HOURS = Number(process.env.ROUND_DURATION_HOURS || '1')
+const COOLDOWN_SECS        = 10 * 60  // 10-minute gap between rounds
 
 if (!PRIVATE_KEY) {
   console.error('ERROR: KEEPER_PRIVATE_KEY (or DEPLOYER_PRIVATE_KEY) not set')
@@ -18,6 +20,8 @@ const ABI = [
   'function roundCount() view returns (uint256)',
   'function getRound(uint256) view returns (tuple(uint256 id, uint256 entryFee, uint256 prizePool, uint256 startTime, uint256 endTime, uint8 state, address[] participantList, address winner, int256 winnerRoiBps))',
   'function getParticipant(uint256, address) view returns (tuple(address addr, bool isAI, int256 roiBps, uint256 tradeCount, bool liquidated, bool claimed))',
+  'function createRound(uint256 entryFee, uint256 startTime, uint256 endTime)',
+  'function activateRound(uint256 roundId)',
   'function submitResults(uint256 roundId, address[] addrs, int256[] roiBpsArr, bool[] liquidatedArr)',
   'event TradeSubmitted(uint256 indexed roundId, address indexed trader, string pair, int256 amountBps, bool isBuy, uint256 logEntryId)',
 ]
@@ -179,6 +183,17 @@ async function computeRoi(provider, roundId, startTime, participants) {
   })
 }
 
+// ── Auto-round creation ────────────────────────────────────────────────────────
+
+async function autoCreateRound(contract, now) {
+  const startTime = now + 60
+  const endTime   = startTime + ROUND_DURATION_HOURS * 3600
+  const entryFee  = ethers.parseEther(ENTRY_FEE_MNT)
+  const tx = await contract.createRound(entryFee, BigInt(startTime), BigInt(endTime))
+  await tx.wait()
+  console.log(`[keeper] New round created ✓ — ${ROUND_DURATION_HOURS}h · ${ENTRY_FEE_MNT} MNT entry fee`)
+}
+
 // ── Finalization ───────────────────────────────────────────────────────────────
 
 async function finalizeRound(contract, provider, roundId, round) {
@@ -209,9 +224,17 @@ let tickRunning = false
 
 async function tick(contract, provider) {
   const count = Number(await contract.roundCount())
-  if (count === 0) return
+  const now   = Math.floor(Date.now() / 1000)
 
-  const now = Math.floor(Date.now() / 1000)
+  if (count === 0) {
+    console.log('[keeper] No rounds exist — creating first round…')
+    try { await autoCreateRound(contract, now) } catch (err) { console.error('[keeper] Auto-create failed:', err.message) }
+    return
+  }
+
+  let hasActive     = false
+  let lastClosedEnd = 0
+  let justFinalized = false
 
   for (let i = 0; i < count; i++) {
     try {
@@ -219,18 +242,49 @@ async function tick(contract, provider) {
       const state   = Number(round.state)
       const endTime = Number(round.endTime)
 
-      // Snap start prices as soon as a round goes Active
-      if (state === ROUND_STATE.Active) {
-        await captureStartPrices(i)
+      if (state === ROUND_STATE.Finalizing) {
+        hasActive = true
       }
 
-      if (state === ROUND_STATE.Active && now >= endTime) {
-        console.log(`[keeper] Round #${i} ended ${Math.floor((now - endTime) / 60)}m ago — finalizing…`)
-        await finalizeRound(contract, provider, i, round)
+      if (state === ROUND_STATE.Open) {
+        hasActive = true
+        const startTime = Number(round.startTime)
+        if (now >= startTime) {
+          console.log(`[keeper] Round #${i} start time passed — activating…`)
+          try {
+            const tx = await contract.activateRound(i)
+            await tx.wait()
+            console.log(`[keeper] Round #${i} activated ✓`)
+          } catch (err) {
+            console.warn(`[keeper] activateRound #${i} failed:`, err.message)
+          }
+        }
+      }
+
+      if (state === ROUND_STATE.Active) {
+        hasActive = true
+        await captureStartPrices(i)
+
+        if (now >= endTime) {
+          console.log(`[keeper] Round #${i} ended ${Math.floor((now - endTime) / 60)}m ago — finalizing…`)
+          await finalizeRound(contract, provider, i, round)
+          justFinalized = true
+          hasActive     = false
+          lastClosedEnd = Math.max(lastClosedEnd, endTime)
+        }
+      }
+
+      if (state === ROUND_STATE.Closed) {
+        lastClosedEnd = Math.max(lastClosedEnd, endTime)
       }
     } catch (err) {
       console.error(`[keeper] Error on round #${i}:`, err.message)
     }
+  }
+
+  if (!hasActive && !justFinalized && now >= lastClosedEnd + COOLDOWN_SECS) {
+    console.log(`[keeper] No active round, cooldown passed — creating new round…`)
+    try { await autoCreateRound(contract, now) } catch (err) { console.error('[keeper] Auto-create failed:', err.message) }
   }
 }
 

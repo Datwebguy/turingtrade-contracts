@@ -10,7 +10,7 @@ const hre = require("hardhat")
 
 const TURING_ROUND = '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3'
 const DURATION_HOURS = 1          // change this — how long the round lasts
-const ENTRY_FEE_MNT  = '0.01'    // entry fee in MNT
+const ENTRY_FEE_MNT  = '0.1'     // entry fee in MNT
 
 async function main() {
   const [deployer] = await hre.ethers.getSigners()

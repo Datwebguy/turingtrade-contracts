@@ -107,7 +107,7 @@ async function fetchTradesFromLogs(provider, roundId, startTime) {
   try {
     const latest      = await provider.getBlockNumber()
     const latestBlock = await provider.getBlock(latest)
-    const secondsBack = BigInt(Math.max(0, latestBlock.timestamp - Number(startTime))) + 600n
+    const secondsBack = BigInt(Math.max(0, Number(latestBlock.timestamp) - Number(startTime))) + 600n
     const blocksBack  = secondsBack / 2n   // ~2s per block on Mantle Sepolia
     fromBlock = latest > blocksBack ? latest - blocksBack : 0n
   } catch {
@@ -197,7 +197,7 @@ async function finalizeRound(contract, provider, roundId, round) {
     console.log(`  ${addr.slice(0, 10)}… → ROI: ${(roiBpsArr[i] / 100).toFixed(2)}%`)
   })
 
-  const tx = await contract.submitResults(roundId, participants, roiBpsArr, liquidatedArr)
+  const tx = await contract.submitResults(roundId, [...participants], roiBpsArr, liquidatedArr)
   console.log(`[keeper] submitResults TX: ${tx.hash}`)
   await tx.wait()
   console.log(`[keeper] Round #${roundId} CLOSED ✓`)

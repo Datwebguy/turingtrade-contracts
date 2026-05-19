@@ -201,7 +201,11 @@ async function finalizeRound(contract, provider, roundId, round) {
   const participants = round.participantList
 
   if (!participants.length) {
-    console.log(`[keeper] Round #${roundId}: no participants — skipping.`)
+    console.log(`[keeper] Round #${roundId}: no participants — closing with empty results.`)
+    const tx = await contract.submitResults(roundId, [], [], [])
+    console.log(`[keeper] submitResults TX: ${tx.hash}`)
+    await tx.wait()
+    console.log(`[keeper] Round #${roundId} CLOSED (empty) ✓`)
     return
   }
 

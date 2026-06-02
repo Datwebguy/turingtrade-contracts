@@ -5,7 +5,8 @@ const path = require('path')
 
 const RPC_URL              = process.env.RPC_URL || 'https://rpc.sepolia.mantle.xyz'
 const PRIVATE_KEY          = process.env.KEEPER_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY
-const CONTRACT_ADDRESS     = '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3'
+const CONTRACT_ADDRESS     = process.env.TURING_ROUND_ADDRESS   || '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3'
+const REGISTRY_ADDRESS     = process.env.AGENT_REGISTRY_ADDRESS || '0x11138917b6Dd0782C8Ef98AC7EBB0c3Bd5706ccE'
 const POLL_INTERVAL_MS     = 60_000
 const ENTRY_FEE_MNT        = process.env.ENTRY_FEE_MNT        || '0.1'
 const ROUND_DURATION_HOURS = Number(process.env.ROUND_DURATION_HOURS || '1')
@@ -24,6 +25,11 @@ const ABI = [
   'function activateRound(uint256 roundId)',
   'function submitResults(uint256 roundId, address[] addrs, int256[] roiBpsArr, bool[] liquidatedArr)',
   'event TradeSubmitted(uint256 indexed roundId, address indexed trader, string pair, int256 amountBps, bool isBuy, uint256 logEntryId)',
+]
+
+const REGISTRY_ABI = [
+  'function ownerToAgent(address owner) view returns (uint256)',
+  'function updateStats(uint256 tokenId, int256 roundRoiBps, bool won)',
 ]
 
 const ROUND_STATE = { Open: 0, Active: 1, Finalizing: 2, Closed: 3 }
@@ -194,9 +200,37 @@ async function autoCreateRound(contract, now) {
   console.log(`[keeper] New round created ✓ — ${ROUND_DURATION_HOURS}h · ${ENTRY_FEE_MNT} MNT entry fee`)
 }
 
+// ── Agent reputation update ────────────────────────────────────────────────────
+
+async function updateAgentStats(registry, participants, roiBpsArr, liquidatedArr) {
+  // Determine winner (mirrors TuringRound.submitResults logic)
+  let winnerAddr = null
+  let best = Number.MIN_SAFE_INTEGER
+  for (let i = 0; i < participants.length; i++) {
+    if (!liquidatedArr[i] && roiBpsArr[i] > best) {
+      best = roiBpsArr[i]
+      winnerAddr = participants[i]
+    }
+  }
+
+  for (let i = 0; i < participants.length; i++) {
+    const addr = participants[i]
+    try {
+      const tokenId = await registry.ownerToAgent(addr)
+      if (tokenId === 0n) continue  // human trader, no agent NFT
+      const won = addr.toLowerCase() === winnerAddr?.toLowerCase()
+      const tx = await registry.updateStats(tokenId, BigInt(roiBpsArr[i]), won)
+      await tx.wait()
+      console.log(`[keeper] updateStats ✓ agent #${tokenId} ROI=${(roiBpsArr[i] / 100).toFixed(2)}% won=${won}`)
+    } catch (err) {
+      console.warn(`[keeper] updateStats failed for ${addr.slice(0, 10)}…:`, err.message)
+    }
+  }
+}
+
 // ── Finalization ───────────────────────────────────────────────────────────────
 
-async function finalizeRound(contract, provider, roundId, round) {
+async function finalizeRound(contract, registry, provider, roundId, round) {
   console.log(`[keeper] Finalizing round #${roundId}…`)
   const participants = round.participantList
 
@@ -220,13 +254,16 @@ async function finalizeRound(contract, provider, roundId, round) {
   console.log(`[keeper] submitResults TX: ${tx.hash}`)
   await tx.wait()
   console.log(`[keeper] Round #${roundId} CLOSED ✓`)
+
+  // Update on-chain reputation for AI agents that participated
+  await updateAgentStats(registry, [...participants], roiBpsArr, liquidatedArr)
 }
 
 // ── Tick ───────────────────────────────────────────────────────────────────────
 
 let tickRunning = false
 
-async function tick(contract, provider) {
+async function tick(contract, registry, provider) {
   const count = Number(await contract.roundCount())
   const now   = Math.floor(Date.now() / 1000)
 
@@ -271,7 +308,7 @@ async function tick(contract, provider) {
 
         if (now >= endTime) {
           console.log(`[keeper] Round #${i} ended ${Math.floor((now - endTime) / 60)}m ago — finalizing…`)
-          await finalizeRound(contract, provider, i, round)
+          await finalizeRound(contract, registry, provider, i, round)
           justFinalized = true
           hasActive     = false
           lastClosedEnd = Math.max(lastClosedEnd, endTime)
@@ -298,17 +335,19 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(RPC_URL)
   const wallet   = new ethers.Wallet(PRIVATE_KEY, provider)
   const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, wallet)
+  const registry = new ethers.Contract(REGISTRY_ADDRESS, REGISTRY_ABI, wallet)
 
   const network = await provider.getNetwork()
   console.log(`[keeper] Connected to chain ${network.chainId}`)
   console.log(`[keeper] Keeper wallet: ${wallet.address}`)
   console.log(`[keeper] Watching TuringRound: ${CONTRACT_ADDRESS}`)
+  console.log(`[keeper] AgentRegistry:  ${REGISTRY_ADDRESS}`)
   console.log(`[keeper] Polling every ${POLL_INTERVAL_MS / 1000}s\n`)
 
   const safeTick = async () => {
     if (tickRunning) return
     tickRunning = true
-    try { await tick(contract, provider) }
+    try { await tick(contract, registry, provider) }
     catch (err) { console.error('[keeper] Tick error:', err.message) }
     finally { tickRunning = false }
   }

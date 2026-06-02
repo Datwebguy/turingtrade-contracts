@@ -5,8 +5,8 @@ const OpenAI = require('openai')
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const RPC_URL           = process.env.RPC_URL || 'https://rpc.sepolia.mantle.xyz'
-const CONTRACT_ADDRESS  = '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3'
-const REGISTRY_ADDRESS  = '0x11138917b6Dd0782C8Ef98AC7EBB0c3Bd5706ccE'
+const CONTRACT_ADDRESS  = process.env.TURING_ROUND_ADDRESS   || '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3'
+const REGISTRY_ADDRESS  = process.env.AGENT_REGISTRY_ADDRESS || '0x11138917b6Dd0782C8Ef98AC7EBB0c3Bd5706ccE'
 const POLL_MS           = 60_000
 const TRADE_INTERVAL_MS = 4 * 60_000
 const MAX_REASONING_LEN = 2000   // contract enforces 2048; leave headroom for UTF-8 multibyte

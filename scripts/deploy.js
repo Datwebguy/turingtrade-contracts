@@ -1,4 +1,6 @@
-const hre = require("hardhat")
+const hre  = require("hardhat")
+const fs   = require("fs")
+const path = require("path")
 
 async function main() {
   const [deployer] = await hre.ethers.getSigners()
@@ -37,6 +39,26 @@ async function main() {
   const entryFee = hre.ethers.parseEther("0.01")
   await turingRound.createRound(entryFee, now + 300, now + 300 + 86400)
   console.log("Round #0 created: entry=0.01 MNT, starts in 5 min, duration=24h")
+
+  // Write addresses to .env so bot scripts pick them up without manual copy-paste
+  const envPath = path.join(__dirname, '../.env')
+  let envContent = ''
+  try { envContent = fs.readFileSync(envPath, 'utf8') } catch { /* no .env yet */ }
+
+  const pairs = [
+    ['TURING_ROUND_ADDRESS',   trAddr],
+    ['AGENT_REGISTRY_ADDRESS', arAddr],
+    ['REASONING_LOG_ADDRESS',  rlAddr],
+    ['TRADE_EXECUTOR_ADDRESS', teAddr],
+  ]
+  for (const [key, val] of pairs) {
+    const re = new RegExp(`^${key}=.*$`, 'm')
+    const line = `${key}=${val}`
+    envContent = re.test(envContent) ? envContent.replace(re, line) : envContent + `\n${line}`
+  }
+  fs.writeFileSync(envPath, envContent.trimStart())
+  console.log('\n── Addresses written to .env ────────────────────────────────')
+  for (const [key, val] of pairs) console.log(`  ${key}=${val}`)
 
   console.log("\n── Paste into turingtrade/src/lib/contracts.js ──────────────")
   console.log(`  TuringRound:   '${trAddr}',`)

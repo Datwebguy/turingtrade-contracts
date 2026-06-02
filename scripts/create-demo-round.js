@@ -1,7 +1,7 @@
 const hre = require("hardhat")
 
 const CONTRACTS = {
-  TuringRound: '0xb5605cAc85c79a98679A743b8E077a21bC652b92',
+  TuringRound: process.env.TURING_ROUND_ADDRESS || '0x5FdD4800B445859DF57B4D987ab12a7C6466FCB3',
 }
 
 const DURATION_MINUTES = 15  // change this if you want longer
